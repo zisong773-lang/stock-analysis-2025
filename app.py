@@ -14,13 +14,14 @@ except ImportError as e:
     st.stop()
 
 # --- 页面设置 ---
-st.set_page_config(page_title="股价复盘 (智能聚合版)", layout="wide")
-st.title("📈 2025 股价复盘系统：智能聚合版")
+st.set_page_config(page_title="股价复盘 (最终修复版)", layout="wide")
+st.title("📈 2025 股价复盘系统：最终修复版")
 st.markdown("---")
 
-# --- 0. 代理设置 ---
+# --- 0. 代理设置 (修改：默认为关闭，适应云端环境) ---
 st.sidebar.header("0. 网络代理设置")
-enable_proxy = st.sidebar.checkbox("开启代理连接", value=True)
+# 【关键修改】默认 value 改为 False，防止云端部署时报错
+enable_proxy = st.sidebar.checkbox("开启代理连接 (本地运行需勾选)", value=False)
 proxy_address = st.sidebar.text_input("代理地址", value="http://127.0.0.1:17890")
 
 if enable_proxy:
@@ -89,7 +90,6 @@ def process_text_smart(text, wrap_width):
     for line in lines:
         line = line.strip()
         if not line: continue
-        # 处理 HTML 换行符
         line = line.replace("<br>", "\n")
         sub_lines = line.split("\n")
         for sl in sub_lines:
@@ -139,8 +139,7 @@ def get_stock_data(source, ticker, start, end, uploaded_file):
     else:
         return generate_mock_data(start, end)
 
-# --- 智能解析核心函数 (含多行聚合功能) ---
-
+# --- 智能解析与聚合函数 ---
 def find_col_in_list(columns, keywords, exclude_keywords=None):
     for col in columns:
         col_str = str(col)
@@ -163,8 +162,7 @@ def extract_table_dynamically(df, required_keywords, name="Table"):
         return found_cols
 
     found_cols = check_columns(df.columns)
-    if found_cols:
-        return df, found_cols
+    if found_cols: return df, found_cols
 
     max_scan = min(len(df), 100)
     for i in range(max_scan):
@@ -181,60 +179,34 @@ def extract_table_dynamically(df, required_keywords, name="Table"):
             new_found_cols = check_columns(new_df.columns)
             if new_found_cols:
                 return new_df, new_found_cols
-    
     return None, None
 
 def aggregate_details(df, group_keys, detail_col, output_detail_name="Detail"):
-    """
-    聚合函数：
-    1. 对关键列 (group_keys) 进行向下填充 (ffill)，处理 Excel 合并单元格。
-    2. 对详情列 (detail_col) 进行合并，将多行文本合并为一段。
-    """
-    if not detail_col:
-        return df
-
-    # 1. 向下填充关键信息（如日期、事件名），让下面的空行也能归属到同一个事件
+    if not detail_col: return df
     for k in group_keys:
         df[k] = df[k].ffill()
     
-    # 2. 定义聚合逻辑：用 HTML <br> 连接多行文本
     def join_text(series):
-        # 过滤掉空值和空白字符
         texts = [str(s).strip() for s in series if pd.notna(s) and str(s).strip() != '']
-        if not texts:
-            return None
-        if len(texts) == 1:
-            return texts[0]
-        # 如果有多行，添加圆点列表样式
+        if not texts: return None
+        if len(texts) == 1: return texts[0]
         return "<br>".join([f"• {t}" for t in texts])
 
-    # 3. 执行聚合
-    # as_index=False 保持列名
     agg_dict = {detail_col: join_text}
-    # 其他非分组、非详情的列（如果有）保留第一个值
-    # 这里简单起见，假设只处理提取出的列
-    
-    # 重命名列以便 groupby
     temp = df.groupby(group_keys, as_index=False).agg(agg_dict)
-    
-    # 将聚合后的详情列重命名为标准名称
     temp = temp.rename(columns={detail_col: output_detail_name})
-    
     return temp
 
 def parse_uploaded_excel(file):
     try:
         all_sheets = pd.read_excel(file, sheet_name=None)
-        
         events_list = []
         phases_list = []
         
-        # 识别规则
         event_rules = {
             'event': (['主要驱动', 'Event'], None),
             'date': (['日期', 'Date', '时间'], ['起始', '开始', 'Start', '结束', 'End'])
         }
-        
         phase_rules = {
             'phase': (['阶段概述', 'Phase'], None),
             'start': (['起始日期', '开始日期', 'Start'], None),
@@ -244,78 +216,47 @@ def parse_uploaded_excel(file):
         for sheet_name, df in all_sheets.items():
             df.columns = df.columns.astype(str).str.strip()
             
-            # --- 1. 提取事件表 ---
+            # 1. 提取事件
             e_df, e_cols = extract_table_dynamically(df, event_rules, "Events")
             if e_df is not None:
                 hover_col = find_col_in_list(e_df.columns, ['详细解释', '因果链', 'Detailed'])
-                
-                # 提取需要的列
                 cols_to_keep = [e_cols['date'], e_cols['event']]
                 if hover_col: cols_to_keep.append(hover_col)
                 temp = e_df[cols_to_keep].copy()
                 
-                # 【新功能】处理多行聚合
                 if hover_col:
-                    # 使用临时列名进行聚合
-                    temp = aggregate_details(
-                        temp, 
-                        group_keys=[e_cols['date'], e_cols['event']], 
-                        detail_col=hover_col,
-                        output_detail_name='详细解释'
-                    )
-                    # 聚合后只需重命名剩下的 key 列
+                    temp = aggregate_details(temp, [e_cols['date'], e_cols['event']], hover_col, '详细解释')
                     temp = temp.rename(columns={e_cols['date']: 'Date', e_cols['event']: '主要驱动'})
                 else:
-                    # 如果没有详情列，直接重命名
                     temp = temp.rename(columns={e_cols['date']: 'Date', e_cols['event']: '主要驱动'})
 
-                # 数据清洗
+                # 【核心修复】：使用 errors='coerce' 避免 "起始日期" 文本报错
                 temp['Date'] = pd.to_datetime(temp['Date'], errors='coerce')
                 temp = temp.dropna(subset=['Date'])
-                
-                if not temp.empty:
-                    events_list.append(temp)
+                if not temp.empty: events_list.append(temp)
             
-            # --- 2. 提取阶段表 ---
+            # 2. 提取阶段
             p_df, p_cols = extract_table_dynamically(df, phase_rules, "Phases")
             if p_df is not None:
                 hover_col = find_col_in_list(p_df.columns, ['关键因素', '要点', 'Key Factors'])
-                
                 cols_to_keep = [p_cols['start'], p_cols['end'], p_cols['phase']]
                 if hover_col: cols_to_keep.append(hover_col)
                 temp = p_df[cols_to_keep].copy()
                 
-                # 【新功能】处理多行聚合
                 if hover_col:
-                    temp = aggregate_details(
-                        temp,
-                        group_keys=[p_cols['start'], p_cols['end'], p_cols['phase']],
-                        detail_col=hover_col,
-                        output_detail_name='关键因素'
-                    )
-                    temp = temp.rename(columns={
-                        p_cols['start']: 'Start date', 
-                        p_cols['end']: 'End date',
-                        p_cols['phase']: '阶段概述'
-                    })
+                    temp = aggregate_details(temp, [p_cols['start'], p_cols['end'], p_cols['phase']], hover_col, '关键因素')
+                    temp = temp.rename(columns={p_cols['start']: 'Start date', p_cols['end']: 'End date', p_cols['phase']: '阶段概述'})
                 else:
-                    temp = temp.rename(columns={
-                        p_cols['start']: 'Start date', 
-                        p_cols['end']: 'End date',
-                        p_cols['phase']: '阶段概述'
-                    })
+                    temp = temp.rename(columns={p_cols['start']: 'Start date', p_cols['end']: 'End date', p_cols['phase']: '阶段概述'})
                 
-                # 数据清洗
+                # 【核心修复】：使用 errors='coerce'
                 temp['Start date'] = pd.to_datetime(temp['Start date'], errors='coerce')
                 temp['End date'] = pd.to_datetime(temp['End date'], errors='coerce')
                 temp = temp.dropna(subset=['Start date'])
-                
-                if not temp.empty:
-                    phases_list.append(temp)
+                if not temp.empty: phases_list.append(temp)
 
         events_df = pd.concat(events_list, ignore_index=True) if events_list else None
         phases_df = pd.concat(phases_list, ignore_index=True) if phases_list else None
-        
         return events_df, phases_df
 
     except Exception as e:
@@ -329,33 +270,26 @@ if uploaded_file:
     stock_df = get_stock_data(data_source, ticker, start_date, end_date_final, uploaded_file)
     
     if stock_df is not None and not stock_df.empty:
-        # 解析数据
         events_df, phases_df = parse_uploaded_excel(uploaded_file)
         
         if events_df is None and phases_df is None:
-            st.warning("⚠️ 未能识别内容。请确保Excel包含：\n1. 事件表：'主要驱动', '日期'\n2. 阶段表：'阶段概述', '起始日期', '结束日期'")
+            st.warning("⚠️ 未能识别内容。请确保Excel包含：'主要驱动'或'阶段概述'列。")
         else:
             try:
                 fig = go.Figure()
 
-                # 1. 绘制股价
+                # 绘制股价
                 fig.add_trace(go.Scatter(
-                    x=stock_df.index,
-                    y=stock_df['Close'],
-                    mode='lines',
-                    name=f"{ticker} 收盘价",
-                    line=dict(color='#1976D2', width=2.5),
-                    line_shape='spline'
+                    x=stock_df.index, y=stock_df['Close'],
+                    mode='lines', name=f"{ticker} 收盘价",
+                    line=dict(color='#1976D2', width=2.5), line_shape='spline'
                 ))
-
                 data_start, data_end = stock_df.index.min(), stock_df.index.max()
 
-                # 2. 绘制阶段
+                # 绘制阶段
                 if phases_df is not None and not phases_df.empty:
                     phase_colors = ["rgba(255,99,132,0.12)", "rgba(54,162,235,0.12)", "rgba(255,206,86,0.15)", "rgba(75,192,192,0.12)"]
-                    
                     target_col = find_col_in_list(phases_df.columns, ['阶段概述'])
-                    
                     for i, row in phases_df.iterrows():
                         p_start = max(row['Start date'], data_start)
                         p_end = min(row['End date'], data_end)
@@ -366,35 +300,24 @@ if uploaded_file:
                             raw_text = str(row.get(target_col, ''))
                             wrapped_text = process_text_smart(raw_text, label_wrap_width)
                             
-                            # 获取聚合后的关键因素
                             hover_col = find_col_in_list(phases_df.columns, ['关键因素', '要点', 'Key Factors'])
-                            # 如果有聚合内容，直接使用；否则使用阶段名称
                             hover_text_raw = str(row.get(hover_col, '')) if hover_col else raw_text
-                            # 因为聚合后可能已经包含了HTML标签(<br>)，所以这里处理时要小心
-                            # 我们可以直接使用 hover_text_raw (如果不为空)，只需简单 wrap 每一行
-                            
-                            # 简单处理：如果包含 <br> 说明已经是聚合过的，直接用 textwrap 处理每段
                             hover_text = process_text_smart(hover_text_raw, hover_wrap_width)
                             
                             current_phase_y = phase_label_y
-                            if phase_stagger:
-                                current_phase_y += (i % 2) * phase_stagger_gap
+                            if phase_stagger: current_phase_y += (i % 2) * phase_stagger_gap
 
                             fig.add_annotation(
                                 x=mid_point, y=current_phase_y, yref="paper", 
-                                text=f"<b>{wrapped_text}</b>",
-                                hovertext=hover_text,
-                                showarrow=False, 
-                                font=dict(size=phase_font_size, color="#555"), 
-                                bgcolor="rgba(255,255,255,0.8)", borderpad=3,
-                                captureevents=True 
+                                text=f"<b>{wrapped_text}</b>", hovertext=hover_text,
+                                showarrow=False, font=dict(size=phase_font_size, color="#555"), 
+                                bgcolor="rgba(255,255,255,0.8)", borderpad=3
                             )
 
-                # 3. 绘制事件
+                # 绘制事件
                 if events_df is not None and not events_df.empty:
                     events_df = events_df.sort_values('Date').reset_index(drop=True)
                     label_col = find_col_in_list(events_df.columns, ['主要驱动'])
-                    
                     for i, row in events_df.iterrows():
                         event_date = row['Date']
                         if data_start <= event_date <= data_end:
@@ -414,8 +337,6 @@ if uploaded_file:
                                 
                                 txt = str(row.get(label_col, ''))
                                 formatted = process_text_smart(txt, label_wrap_width)
-                                
-                                # 获取聚合后的详细解释
                                 hover_col = find_col_in_list(events_df.columns, ['详细解释', '因果链', 'Detailed'])
                                 hover_text_raw = str(row.get(hover_col, '')) if hover_col else txt
                                 hover_formatted = process_text_smart(hover_text_raw, hover_wrap_width)
@@ -428,12 +349,11 @@ if uploaded_file:
                                     font=dict(size=event_font_size, color="#333"), 
                                     bgcolor=f"rgba(255,255,255,{bg_opacity})", 
                                     bordercolor=color, borderwidth=1, borderpad=3,
-                                    hoverlabel=dict(bgcolor="white", font=dict(size=event_font_size)),
-                                    captureevents=True 
+                                    hoverlabel=dict(bgcolor="white", font=dict(size=event_font_size))
                                 )
                             except: pass
 
-                # 4. 布局
+                # 布局
                 y_max = stock_df['Close'].max()
                 y_min = stock_df['Close'].min()
                 range_max = y_max * (1 + y_headroom / 100)
@@ -442,15 +362,10 @@ if uploaded_file:
                 fig.update_layout(
                     title=dict(text=f"{ticker} 收盘价趋势复盘", x=0.5, font=dict(size=22)),
                     yaxis_title="收盘价 (JPY)",
-                    height=950,
-                    xaxis_rangeslider_visible=False,
-                    template="plotly_white",
-                    margin=dict(t=top_margin, r=50, b=bottom_margin), 
-                    plot_bgcolor='rgba(250,250,250,1)',
-                    hovermode="x unified",
-                    dragmode="pan"
+                    height=950, xaxis_rangeslider_visible=False,
+                    template="plotly_white", margin=dict(t=top_margin, r=50, b=bottom_margin), 
+                    plot_bgcolor='rgba(250,250,250,1)', hovermode="x unified", dragmode="pan"
                 )
-                
                 fig.update_xaxes(tickformat="%y年%-m月", dtick="M1", showgrid=True, gridcolor='rgba(0,0,0,0.05)')
                 fig.update_yaxes(range=[range_min, range_max], showgrid=True, gridcolor='rgba(0,0,0,0.05)')
 
